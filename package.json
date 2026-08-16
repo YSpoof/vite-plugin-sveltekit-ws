@@ -1,0 +1,44 @@
+{
+  "name": "vite-plugin-sveltekit-ws",
+  "version": "1.0.1",
+  "description": "Vite plugin to add WebSocket support to SvelteKit using adapter-node",
+  "keywords": [
+    "adapter-node",
+    "sveltekit",
+    "vite",
+    "websocket",
+    "ws"
+  ],
+  "license": "MIT",
+  "author": "n0tz3r0",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup && tsc",
+    "dev": "tsup --watch"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "ws": "^8.21.3"
+  },
+  "peerDependencies": {
+    "@sveltejs/adapter-node": "^5.5.7",
+    "@sveltejs/kit": "^2.70.2",
+    "vite": "^8.0.0",
+    "ws": "^8.0.0"
+  }
+}
