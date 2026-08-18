@@ -49,7 +49,7 @@ export default defineConfig({
 The WebSocket endpoint is now:
 
 ```text
-ws://localhost:5173/ws
+ws://0.0.0.0:5173/ws
 ```
 
 ## Options
@@ -90,3 +90,6 @@ PORT=8080 node build/server.js
 ```
 
 That's it — the plugin provides the WebSocket upgrade handling while your handler manages the connections.
+
+## Source Code
+Since this plugin is MIT licensed, you can also contribute to it at it's repo on [GitHub](https://github.com/yspoof/vite-plugin-sveltekit-ws)

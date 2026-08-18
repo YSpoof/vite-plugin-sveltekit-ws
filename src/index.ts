@@ -64,7 +64,7 @@ httpServer.on("upgrade", (req, socket, head) => {
 });
 
 httpServer.listen(port, () => {
-  console.log(\`[SvelteKit WS] Server listening on http://localhost:\${port}\`);
+  console.log(\`[SvelteKit WS] Server listening on http://0.0.0.0:\${port}\`);
 });
 `;
 
