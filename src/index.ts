@@ -1,7 +1,8 @@
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import fs, { existsSync } from "node:fs";
+import path, { resolve } from "node:path";
 
-import { build, type Plugin, type ResolvedConfig } from "vite";
+import { build, type Plugin as EsbuildPlugin } from "esbuild";
+import { type Plugin, type ResolvedConfig } from "vite";
 import { WebSocketServer } from "ws";
 
 export interface SvelteKitWebSocketOptions {
@@ -28,16 +29,137 @@ export interface SvelteKitWebSocketOptions {
   serverBuildName?: string;
 }
 
-/** Kit only calls set_env() from Server.init(). WS bundle never inits, so append the same call Kit uses in dev. */
-function svelteKitEnvPlugin(): Plugin {
+type EnvVarDef = { name: string; public: boolean; static: boolean };
+
+function firstExistingFile(candidates: string[]): string | null {
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function resolveExistingFile(basePath: string): string | null {
+  const ext = path.extname(basePath);
+  if (ext === ".js" || ext === ".mjs") {
+    const stem = basePath.slice(0, -ext.length);
+    return firstExistingFile([basePath, `${stem}.ts`, `${stem}.tsx`, `${stem}.mts`]);
+  }
+
+  return firstExistingFile([
+    basePath,
+    `${basePath}.ts`,
+    `${basePath}.tsx`,
+    `${basePath}.js`,
+    path.join(basePath, "index.ts"),
+    path.join(basePath, "index.js"),
+  ]);
+}
+
+function envFilePath(projectRoot: string): string | null {
+  return resolveExistingFile(path.join(projectRoot, "src/env"));
+}
+
+function parseEnvVars(projectRoot: string): EnvVarDef[] {
+  const entry = envFilePath(projectRoot);
+  if (!entry) return [];
+
+  const source = fs.readFileSync(entry, "utf8");
+  const vars: EnvVarDef[] = [];
+
+  for (const match of source.matchAll(/^\s*([A-Za-z_][\w]*)\s*:\s*\{([^}]*)\}/gm)) {
+    vars.push({
+      name: match[1],
+      public: /\bpublic\s*:\s*true\b/.test(match[2]),
+      static: /\bstatic\s*:\s*true\b/.test(match[2]),
+    });
+  }
+
+  return vars;
+}
+
+function envShimSource(
+  kind: "private" | "public",
+  projectRoot: string,
+  vars: EnvVarDef[],
+  dev: boolean,
+): string {
+  const mode = dev ? "development" : "production";
+  const names = vars.filter((v) => (kind === "public") === v.public);
+
+  const header = `
+import fs from "node:fs";
+import path from "node:path";
+import { loadEnvFile } from "node:process";
+
+let loaded = false;
+function ensureEnvLoaded() {
+  if (loaded) return;
+  loaded = true;
+  const root = ${JSON.stringify(projectRoot)};
+  for (const file of ${JSON.stringify([`.env.${mode}.local`, `.env.${mode}`, ".env.local", ".env"])}) {
+    const fullPath = path.join(root, file);
+    if (!fs.existsSync(fullPath)) continue;
+    loadEnvFile(fullPath);
+  }
+}
+ensureEnvLoaded();
+`;
+
+  const exports = names
+    .map((v) => {
+      if (v.static) {
+        const value = process.env[v.name];
+        return `export const ${v.name} = ${value === undefined ? "undefined" : JSON.stringify(value)};`;
+      }
+      return `export const ${v.name} = process.env.${v.name};`;
+    })
+    .join("\n");
+
+  return `${header}\n${exports}\n`;
+}
+
+function svelteKitEnvPlugin(projectRoot: string, dev: boolean): EsbuildPlugin {
   return {
     name: "sveltekit-env",
-    enforce: "pre",
-    transform(code, id) {
-      const file = id.split("?")[0].replaceAll("\\", "/");
-      if (!file.includes("/.svelte-kit/generated/") || !file.endsWith("/env/config.js")) return;
-      if (code.includes("set_env(nodeProcess.env)")) return;
-      return `import nodeProcess from "node:process";\n${code}\nset_env(nodeProcess.env);\n`;
+    setup(esbuild) {
+      esbuild.onResolve({ filter: /^\$app\/env\/(private|public)$/ }, (args) => ({
+        path: args.path,
+        namespace: "sveltekit-env",
+      }));
+
+      esbuild.onLoad({ filter: /.*/, namespace: "sveltekit-env" }, (args) => {
+        const kind = args.path.endsWith("private") ? "private" : "public";
+        return {
+          contents: envShimSource(kind, projectRoot, parseEnvVars(projectRoot), dev),
+          loader: "js",
+        };
+      });
+    },
+  };
+}
+
+function svelteKitModulesPlugin(projectRoot: string): EsbuildPlugin {
+  const libRoot = path.join(projectRoot, "src/lib");
+
+  return {
+    name: "sveltekit-modules",
+    setup(esbuild) {
+      esbuild.onResolve({ filter: /^#lib(\/|$)/ }, (args) => {
+        const subpath = args.path === "#lib" ? "" : args.path.slice("#lib/".length);
+        const resolved = resolveExistingFile(path.join(libRoot, subpath));
+        if (!resolved) {
+          return { errors: [{ text: `Could not resolve ${args.path}` }] };
+        }
+        return { path: resolved };
+      });
+
+      esbuild.onResolve({ filter: /^\.\.?\/.*\.js$/ }, (args) => {
+        if (!args.resolveDir) return;
+        const resolved = resolveExistingFile(path.join(args.resolveDir, args.path));
+        if (resolved) return { path: resolved };
+      });
     },
   };
 }
@@ -54,10 +176,6 @@ export function svelteKitWebSocket(options: SvelteKitWebSocketOptions): Plugin {
   let config: ResolvedConfig;
   let absoluteHandlerPath: string;
 
-  const virtualEntryId = "virtual:ws-server-entry";
-  const resolvedVirtualEntryId = `\0${virtualEntryId}`;
-
-  // Dynamically templates the server entry point
   const generateServerEntry = (safePath: string) => `
 import process from "node:process";
 import { createServer } from "node:http";
@@ -88,7 +206,6 @@ httpServer.listen(port, () => {
 
     configResolved(resolvedConfig) {
       config = resolvedConfig;
-      // Securely resolve the path from the user's project root
       absoluteHandlerPath = resolve(config.root, handlerPath);
     },
 
@@ -100,7 +217,6 @@ httpServer.listen(port, () => {
         if (pathname !== route) return;
 
         try {
-          // LIVE HMR: Dynamically load the handler on every request during dev.
           const mod = await server.ssrLoadModule(absoluteHandlerPath);
           const wsHandler = mod[exportName];
 
@@ -116,7 +232,6 @@ httpServer.listen(port, () => {
       });
     },
 
-    // Vite 8 Environment buildApp hook
     buildApp: {
       order: "post",
       async handler() {
@@ -129,49 +244,27 @@ httpServer.listen(port, () => {
           return;
         }
 
-        // Normalize backslashes for Windows path stringification
-        const safeHandlerPath = absoluteHandlerPath.replace(/\\\\/g, "/");
+        const safeHandlerPath = absoluteHandlerPath.replace(/\\/g, "/");
+        const entryPath = path.join(absoluteOutDir, ".ws-server-entry.mjs");
 
-        // Fire a nested build for the server entry
-        await build({
-          configFile: false,
-          root: config.root,
-          resolve: {
-            alias: config.resolve.alias,
-          },
-          plugins: [
-            svelteKitEnvPlugin(),
-            {
-              name: "ws-server-entry",
-              resolveId(id) {
-                if (id === virtualEntryId) return resolvedVirtualEntryId;
-                if (id === "./handler.js") return { id: "./handler.js", external: true };
-              },
-              load(id) {
-                if (id === resolvedVirtualEntryId) {
-                  return generateServerEntry(safeHandlerPath);
-                }
-              },
-            },
-          ],
-          build: {
-            emptyOutDir: false,
-            outDir: absoluteOutDir,
-            ssr: true,
-            target: "node20",
-            minify: false,
-            write: true,
-            rolldownOptions: {
-              input: virtualEntryId,
-              output: {
-                entryFileNames: serverBuildName,
-                format: "es",
-              },
-              external: (id: string) => id === "ws" || id.startsWith("node:"),
-            },
-          },
-          logLevel: "warn",
-        });
+        fs.writeFileSync(entryPath, generateServerEntry(safeHandlerPath));
+
+        try {
+          await build({
+            entryPoints: [entryPath],
+            outfile: path.join(absoluteOutDir, serverBuildName),
+            bundle: true,
+            platform: "node",
+            format: "esm",
+            target: "node22",
+            packages: "external",
+            external: ["node:*", "ws", "./handler.js"],
+            plugins: [svelteKitEnvPlugin(config.root, false), svelteKitModulesPlugin(config.root)],
+            logLevel: "silent",
+          });
+        } finally {
+          fs.unlinkSync(entryPath);
+        }
       },
     },
   };

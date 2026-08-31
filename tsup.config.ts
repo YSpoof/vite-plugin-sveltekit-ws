@@ -6,5 +6,5 @@ export default defineConfig({
   dts: false,
   clean: true,
   minify: true,
-  external: ["vite", "ws"],
+  external: ["vite", "ws", "esbuild"],
 });
