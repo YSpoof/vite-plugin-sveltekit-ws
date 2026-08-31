@@ -1,5 +1,6 @@
-import { resolve } from "node:path";
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { build, type Plugin, type ResolvedConfig } from "vite";
 import { WebSocketServer } from "ws";
 
@@ -25,6 +26,20 @@ export interface SvelteKitWebSocketOptions {
    * Name of the generated custom server file (default: 'server.js')
    */
   serverBuildName?: string;
+}
+
+/** Kit only calls set_env() from Server.init(). WS bundle never inits, so append the same call Kit uses in dev. */
+function svelteKitEnvPlugin(): Plugin {
+  return {
+    name: "sveltekit-env",
+    enforce: "pre",
+    transform(code, id) {
+      const file = id.split("?")[0].replaceAll("\\", "/");
+      if (!file.includes("/.svelte-kit/generated/") || !file.endsWith("/env/config.js")) return;
+      if (code.includes("set_env(nodeProcess.env)")) return;
+      return `import nodeProcess from "node:process";\n${code}\nset_env(nodeProcess.env);\n`;
+    },
+  };
 }
 
 export function svelteKitWebSocket(options: SvelteKitWebSocketOptions): Plugin {
@@ -104,7 +119,7 @@ httpServer.listen(port, () => {
     // Vite 8 Environment buildApp hook
     buildApp: {
       order: "post",
-      async handler(builder) {
+      async handler() {
         const absoluteOutDir = resolve(config.root, outDir);
 
         if (!existsSync(resolve(absoluteOutDir, "handler.js"))) {
@@ -125,6 +140,7 @@ httpServer.listen(port, () => {
             alias: config.resolve.alias,
           },
           plugins: [
+            svelteKitEnvPlugin(),
             {
               name: "ws-server-entry",
               resolveId(id) {
@@ -141,6 +157,7 @@ httpServer.listen(port, () => {
           build: {
             emptyOutDir: false,
             outDir: absoluteOutDir,
+            ssr: true,
             target: "node20",
             minify: false,
             write: true,
